@@ -1,0 +1,17 @@
+
+
+services:
+  postgres:
+    image: postgres:16-alpine        # lightweight official Postgres image
+    container_name: meetingcost-db
+    environment:
+      POSTGRES_DB: meetingcost       # database name
+      POSTGRES_USER: mcuser          # username
+      POSTGRES_PASSWORD: mcpassword  # password (local dev only — never commit real passwords)
+    ports:
+      - "5432:5432"                  # expose port 5432 to your local machine
+    volumes:
+      - meetingcost-data:/var/lib/postgresql/data   # persist data between restarts
+
+volumes:
+  meetingcost-data:

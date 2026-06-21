@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MeetingCost Live Ticker</title>
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; background: #0f172a; color: #f1f5f9; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        .card { background: #1e293b; border-radius: 16px; padding: 48px; text-align: center; min-width: 400px; box-shadow: 0 25px 50px rgba(0,0,0,0.5); }
+        h1 { color: #38bdf8; margin-bottom: 8px; font-size: 1.5rem; }
+        .cost { font-size: 4rem; font-weight: bold; color: #f59e0b; margin: 24px 0; font-variant-numeric: tabular-nums; }
+        .elapsed { color: #94a3b8; font-size: 1.2rem; margin-bottom: 24px; }
+        .participants { color: #64748b; font-size: 0.9rem; margin-bottom: 32px; }
+        input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #f1f5f9; font-size: 1rem; box-sizing: border-box; margin-bottom: 12px; }
+        button { width: 100%; padding: 14px; border-radius: 8px; border: none; font-size: 1rem; font-weight: bold; cursor: pointer; margin-bottom: 8px; }
+        .btn-start { background: #22c55e; color: white; }
+        .btn-stop  { background: #ef4444; color: white; }
+        .status { font-size: 0.8rem; color: #64748b; margin-top: 16px; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h1>MeetingCost.io</h1>
+    <p style="color:#64748b;margin-bottom:32px;">Live Meeting Cost Ticker</p>
+    <div class="cost" id="cost">$0.00</div>
+    <div class="elapsed" id="elapsed">00:00:00</div>
+    <div class="participants" id="participants">-- participants</div>
+    <input id="meetingId" placeholder="Paste meeting UUID here" />
+    <button class="btn-start" onclick="startMeeting()">Start Tracking</button>
+    <button class="btn-stop"  onclick="stopMeeting()">Stop Tracking</button>
+    <div class="status" id="status">Not connected</div>
+</div>
+<script>
+    let stompClient = null;
+    let currentMeetingId = null;
+
+    function connect() {
+      const socket = new SockJS('http://localhost:8080/ws');
+      stompClient = Stomp.over(socket);
+      stompClient.debug = null;
+      stompClient.connect({}, () => {
+        document.getElementById('status').textContent = 'Connected to WebSocket';
+      });
+    }
+
+    function startMeeting() {
+      currentMeetingId = document.getElementById('meetingId').value.trim();
+      if (!currentMeetingId) { alert('Enter a meeting UUID'); return; }
+
+      stompClient.subscribe('/topic/cost/' + currentMeetingId, msg => {
+        const data = JSON.parse(msg.body);
+        document.getElementById('cost').textContent = data.formattedCost;
+        document.getElementById('elapsed').textContent = data.formattedElapsed;
+        document.getElementById('participants').textContent =
+          data.participantCount + ' participants · ' + data.meetingTitle;
+      });
+
+      stompClient.send('/app/meeting/start', {}, JSON.stringify(currentMeetingId));
+      document.getElementById('status').textContent = 'Tracking: ' + currentMeetingId;
+    }
+
+    function stopMeeting() {
+      if (currentMeetingId) {
+        stompClient.send('/app/meeting/stop', {}, JSON.stringify(currentMeetingId));
+        document.getElementById('status').textContent = 'Stopped tracking';
+      }
+    }
+
+    connect();
+</script>
+</body>
+</html>
