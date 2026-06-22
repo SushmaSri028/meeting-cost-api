@@ -35,7 +35,7 @@ spring:
               - profile
               - email
               - https://www.googleapis.com/auth/calendar.readonly
-            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+            redirect-uri: "https://meeting-cost-api-production.up.railway.app/login/oauth2/code/google"
             authorization-grant-type: authorization_code
 
 server:
