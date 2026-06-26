@@ -47,4 +47,16 @@ public class User {
     @UpdateTimestamp                      // Hibernate updates this automatically on UPDATE
     @Column(name = "updated_at", nullable = false)
     private OffsetDateTime updatedAt;
+
+    @Column(name = "provider", length = 20)
+    private String provider = "GOOGLE";
+
+    @Column(name = "microsoft_access_token", columnDefinition = "TEXT")
+    private String microsoftAccessToken;
+
+    @Column(name = "microsoft_refresh_token", columnDefinition = "TEXT")
+    private String microsoftRefreshToken;
+
+    @Column(name = "microsoft_token_expiry")
+    private OffsetDateTime microsoftTokenExpiry;
 }

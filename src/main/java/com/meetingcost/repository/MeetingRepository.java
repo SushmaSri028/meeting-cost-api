@@ -23,8 +23,6 @@ public interface MeetingRepository extends JpaRepository<Meeting, UUID> {
             User user, OffsetDateTime start, OffsetDateTime end);
 
     // Custom JPQL query — JOIN FETCH loads participants in the same query
-    // prevents N+1: without this, accessing meeting.getParticipants() fires
-    // a separate SQL query per meeting
     @Query("SELECT m FROM Meeting m " +
             "LEFT JOIN FETCH m.participants " +
             "WHERE m.user = :user " +

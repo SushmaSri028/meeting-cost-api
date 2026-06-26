@@ -1,5 +1,6 @@
 package com.meetingcost.controller;
 
+import com.meetingcost.service.MicrosoftCalendarService;
 import com.meetingcost.entity.User;
 import com.meetingcost.repository.UserRepository;
 import com.meetingcost.service.CalendarSyncService;
@@ -17,6 +18,7 @@ public class CalendarController {
 
     private final CalendarSyncService calendarSyncService;
     private final UserRepository userRepository;
+    private final MicrosoftCalendarService microsoftCalendarService;
 
     // Trigger a manual sync for the current user (for testing)
     @PostMapping("/sync")
@@ -54,6 +56,51 @@ public class CalendarController {
                 "connected", user.getGoogleRefreshToken() != null,
                 "email",     email,
                 "connectUrl", "/oauth2/authorization/google"
+        ));
+    }
+    // Sync Microsoft Outlook calendar
+    @PostMapping("/microsoft/sync")
+    public ResponseEntity<Map<String, Object>> syncMicrosoftCalendar() {
+        String email = SecurityContextHolder.getContext()
+                .getAuthentication().getName();
+
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        if (user.getMicrosoftAccessToken() == null) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of(
+                            "error",   "No Microsoft account connected",
+                            "message", "Please sign in with Microsoft first."
+                    ));
+        }
+
+        try {
+            int count = microsoftCalendarService.syncCalendar(user);
+            return ResponseEntity.ok(Map.of(
+                    "message", "Outlook synced! " + count + " meetings imported.",
+                    "count",   count
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    // Check Microsoft connection status
+    @GetMapping("/microsoft/status")
+    public ResponseEntity<Map<String, Object>> microsoftStatus() {
+        String email = SecurityContextHolder.getContext()
+                .getAuthentication().getName();
+
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        boolean connected = user.getMicrosoftAccessToken() != null;
+
+        return ResponseEntity.ok(Map.of(
+                "connected",  connected,
+                "connectUrl", "/oauth2/authorization/microsoft"
         ));
     }
 }

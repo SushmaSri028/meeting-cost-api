@@ -37,7 +37,26 @@ spring:
               - https://www.googleapis.com/auth/calendar.readonly
             redirect-uri: "https://meeting-cost-api-production.up.railway.app/login/oauth2/code/google"
             authorization-grant-type: authorization_code
-
+          microsoft:
+            client-id: ${AZURE_CLIENT_ID}
+            client-secret: ${AZURE_CLIENT_SECRET}
+            scope:
+              - openid
+              - profile
+              - email
+              - https://graph.microsoft.com/Calendars.Read
+              - https://graph.microsoft.com/User.Read
+              - offline_access
+            redirect-uri: "https://meeting-cost-api-production.up.railway.app/login/oauth2/code/microsoft"
+            authorization-grant-type: authorization_code
+            client-authentication-method: client_secret_post
+        provider:
+          microsoft:
+            authorization-uri: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
+            token-uri: https://login.microsoftonline.com/common/oauth2/v2.0/token
+            user-info-uri: https://graph.microsoft.com/oidc/userinfo
+            jwk-set-uri: https://login.microsoftonline.com/common/discovery/v2.0/keys
+            user-name-attribute: sub
 server:
   port: ${PORT:8080}
   error:

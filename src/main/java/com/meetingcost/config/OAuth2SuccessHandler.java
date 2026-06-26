@@ -40,9 +40,13 @@ public class OAuth2SuccessHandler extends SimpleUrlAuthenticationSuccessHandler 
 
         // 1. Get the OAuth2 user attributes from Google
         OAuth2User oauthUser = oauthToken.getPrincipal();
-        String email       = oauthUser.getAttribute("email");
-        String name        = oauthUser.getAttribute("name");
+        String registrationId = oauthToken.getAuthorizedClientRegistrationId();
 
+        // Microsoft may use preferred_username instead of email
+        String email = oauthUser.getAttribute("email");
+        if (email == null) email = oauthUser.getAttribute("preferred_username");
+        String name = oauthUser.getAttribute("name");
+        if (name == null) name = email;
         // 2. Load the authorized client to get access + refresh tokens
         OAuth2AuthorizedClient authorizedClient = authorizedClientService.loadAuthorizedClient(
                 oauthToken.getAuthorizedClientRegistrationId(),
@@ -67,15 +71,29 @@ public class OAuth2SuccessHandler extends SimpleUrlAuthenticationSuccessHandler 
         }
 
         // 4. Save/update Google tokens
-        user.setGoogleAccessToken(accessToken);
-        user.setGoogleRefreshToken(refreshToken);
-        user.setGoogleTokenExpiry(
-                authorizedClient.getAccessToken().getExpiresAt() != null
-                        ? OffsetDateTime.ofInstant(
-                        authorizedClient.getAccessToken().getExpiresAt(),
-                        java.time.ZoneOffset.UTC)
-                        : OffsetDateTime.now().plusHours(1)
-        );
+        // 4. Save tokens to the correct provider fields
+        if ("microsoft".equalsIgnoreCase(registrationId)) {
+            user.setMicrosoftAccessToken(accessToken);
+            user.setMicrosoftRefreshToken(refreshToken);
+            user.setMicrosoftTokenExpiry(
+                    authorizedClient.getAccessToken().getExpiresAt() != null
+                            ? OffsetDateTime.ofInstant(
+                            authorizedClient.getAccessToken().getExpiresAt(),
+                            java.time.ZoneOffset.UTC)
+                            : OffsetDateTime.now().plusHours(1)
+            );
+        } else {
+            user.setGoogleAccessToken(accessToken);
+            user.setGoogleRefreshToken(refreshToken);
+            user.setGoogleTokenExpiry(
+                    authorizedClient.getAccessToken().getExpiresAt() != null
+                            ? OffsetDateTime.ofInstant(
+                            authorizedClient.getAccessToken().getExpiresAt(),
+                            java.time.ZoneOffset.UTC)
+                            : OffsetDateTime.now().plusHours(1)
+            );
+        }
+        user.setProvider(registrationId.toUpperCase());
 
         userRepository.save(user);
 
@@ -84,7 +102,9 @@ public class OAuth2SuccessHandler extends SimpleUrlAuthenticationSuccessHandler 
 
         // 6. Redirect to frontend with JWT in URL
         // Frontend reads it from URL params and stores in memory/state
-        String redirectUrl = frontendUrl + "/oauth2/callback?token=" + jwt;
+        String redirectUrl = frontendUrl + "/oauth2/callback?token=" + jwt
+                + "&name=" + java.net.URLEncoder.encode(name != null ? name : "", "UTF-8")
+                + "&email=" + java.net.URLEncoder.encode(email != null ? email : "", "UTF-8");
         getRedirectStrategy().sendRedirect(request, response, redirectUrl);
     }
 }
