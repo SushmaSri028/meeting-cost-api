@@ -235,8 +235,7 @@ public class MicrosoftCalendarService {
         if (dateTime == null) return null;
         try {
             // Microsoft sends floating datetimes (no offset) when timeZone field is present
-            if (!dateTime.contains("Z") && !dateTime.contains("+") && !dateTime.contains("-", 10)) {
-                // Treat as UTC (Graph calendarView always returns UTC for calendarView endpoint)
+            if (!dateTime.contains("Z") && !dateTime.contains("+") && dateTime.indexOf("-", 10) < 0) {                // Treat as UTC (Graph calendarView always returns UTC for calendarView endpoint)
                 dateTime = dateTime + "Z";
             }
             return OffsetDateTime.parse(dateTime, MS_DATETIME).withOffsetSameInstant(ZoneOffset.UTC);
