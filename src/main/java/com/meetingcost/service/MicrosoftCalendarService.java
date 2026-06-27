@@ -3,175 +3,245 @@ package com.meetingcost.service;
 import com.meetingcost.entity.Meeting;
 import com.meetingcost.entity.User;
 import com.meetingcost.repository.MeetingRepository;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.meetingcost.repository.UserRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
-import java.time.*;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoField;
-import java.util.*;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 @Service
+@RequiredArgsConstructor
+@Slf4j
 public class MicrosoftCalendarService {
 
-    private static final Logger log = LoggerFactory.getLogger(MicrosoftCalendarService.class);
-    private static final String GRAPH_BASE    = "https://graph.microsoft.com/v1.0";
-    private static final int SYNC_DAYS_BACK   = 7;
-    private static final int SYNC_DAYS_FORWARD = 30;
-    private static final double DEFAULT_SALARY = 100_000.0;
-
     private final MeetingRepository meetingRepository;
+    private final UserRepository    userRepository;
     private final RestTemplate      restTemplate;
 
-    public MicrosoftCalendarService(MeetingRepository meetingRepository) {
-        this.meetingRepository = meetingRepository;
-        this.restTemplate      = new RestTemplate();
-    }
+    @Value("${spring.security.oauth2.client.registration.microsoft.client-id}")
+    private String clientId;
 
-    // ─── Public entry point ───────────────────────────────────────────────────
+    @Value("${spring.security.oauth2.client.registration.microsoft.client-secret}")
+    private String clientSecret;
 
+    // Flexible parser: handles "2024-06-01T10:00:00Z", "2024-06-01T10:00:00.0000000",
+    // "2024-06-01T10:00:00+05:30", etc.
+    private static final DateTimeFormatter MS_DATETIME = new DateTimeFormatterBuilder()
+            .appendPattern("yyyy-MM-dd'T'HH:mm:ss")
+            .optionalStart().appendFraction(ChronoField.NANO_OF_SECOND, 0, 7, true).optionalEnd()
+            .optionalStart().appendOffsetId().optionalEnd()
+            .toFormatter();
+
+    // -------------------------------------------------------------------------
+    // PUBLIC: called by CalendarController
+    // -------------------------------------------------------------------------
+
+    @Transactional
     public int syncCalendar(User user) {
-        String accessToken = user.getMicrosoftAccessToken();
-        if (accessToken == null || accessToken.isBlank()) {
-            throw new IllegalStateException("No Microsoft access token. Sign in with Microsoft first.");
+        // 1. Ensure we have a valid (non-expired) access token
+        String accessToken = refreshTokenIfNeeded(user);
+
+        // 2. Fetch events from Graph API (last 30 days → next 30 days)
+        String now   = OffsetDateTime.now(ZoneOffset.UTC).minusDays(30)
+                .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+        String later = OffsetDateTime.now(ZoneOffset.UTC).plusDays(30)
+                .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+
+        String url = "https://graph.microsoft.com/v1.0/me/calendarView"
+                + "?startDateTime=" + now
+                + "&endDateTime=" + later
+                + "&$top=100"
+                + "&$select=id,subject,bodyPreview,start,end,attendees,organizer";
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(accessToken);
+        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+
+        ResponseEntity<Map> response = restTemplate.exchange(
+                url, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
+
+        if (!response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
+            throw new RuntimeException("Graph API returned: " + response.getStatusCode());
         }
 
-        List<Map<String, Object>> events = fetchOutlookEvents(accessToken);
-        int count = 0;
+        List<Map<String, Object>> events =
+                (List<Map<String, Object>>) response.getBody().get("value");
 
+        if (events == null || events.isEmpty()) {
+            log.info("No Outlook events found for user {}", user.getEmail());
+            return 0;
+        }
+
+        // 3. Upsert each event
+        int count = 0;
         for (Map<String, Object> event : events) {
             try {
-                Meeting meeting = convertToMeeting(event, user);
-                if (meeting != null) {
-                    meetingRepository.save(meeting);
-                    count++;
-                }
+                count += upsertEvent(user, event);
             } catch (Exception e) {
-                log.warn("Skipping event due to error: {}", e.getMessage());
+                log.warn("Skipping Outlook event due to error: {}", e.getMessage());
             }
         }
 
-        log.info("Synced {} Outlook events for {}", count, user.getEmail());
+        log.info("Synced {} Outlook meetings for {}", count, user.getEmail());
         return count;
     }
 
-    // ─── Fetch events from Microsoft Graph API ────────────────────────────────
+    // -------------------------------------------------------------------------
+    // TOKEN REFRESH
+    // Checks if the stored token expires within 5 minutes; if so, exchanges
+    // the refresh token for a new access token and persists it.
+    // Returns the valid access token to use for the API call.
+    // -------------------------------------------------------------------------
 
-    @SuppressWarnings("unchecked")
-    private List<Map<String, Object>> fetchOutlookEvents(String accessToken) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(accessToken);
-        headers.set("Accept", "application/json");
-        HttpEntity<Void> entity = new HttpEntity<>(headers);
+    private String refreshTokenIfNeeded(User user) {
+        boolean expired = user.getMicrosoftTokenExpiry() == null
+                || user.getMicrosoftTokenExpiry().isBefore(OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(5));
 
-        String startDateTime = OffsetDateTime.now(ZoneOffset.UTC)
-                .minusDays(SYNC_DAYS_BACK)
-                .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
-        String endDateTime = OffsetDateTime.now(ZoneOffset.UTC)
-                .plusDays(SYNC_DAYS_FORWARD)
-                .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
-
-        String url = GRAPH_BASE + "/me/calendarView"
-                + "?startDateTime=" + startDateTime
-                + "&endDateTime="   + endDateTime
-                + "&$select=id,subject,start,end,attendees,organizer"
-                + "&$top=50";
-
-        try {
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    url, HttpMethod.GET, entity, Map.class);
-
-            if (response.getStatusCode() == HttpStatus.OK && response.getBody() != null) {
-                Object value = response.getBody().get("value");
-                if (value instanceof List) {
-                    return (List<Map<String, Object>>) value;
-                }
-            }
-        } catch (Exception e) {
-            log.error("Failed to fetch Outlook events: {}", e.getMessage());
-            throw new RuntimeException(
-                    "Could not fetch Outlook calendar. Your Microsoft session may have expired.");
+        if (!expired) {
+            return user.getMicrosoftAccessToken();
         }
 
-        return Collections.emptyList();
+        log.info("Microsoft token expired for {} — refreshing...", user.getEmail());
+
+        if (user.getMicrosoftRefreshToken() == null) {
+            throw new RuntimeException(
+                    "Microsoft session expired and no refresh token available. Please sign in with Microsoft again.");
+        }
+
+        // POST to Microsoft token endpoint
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+
+        MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
+        body.add("grant_type",    "refresh_token");
+        body.add("client_id",     clientId);
+        body.add("client_secret", clientSecret);
+        body.add("refresh_token", user.getMicrosoftRefreshToken());
+        body.add("scope",
+                "openid profile email " +
+                        "https://graph.microsoft.com/Calendars.Read " +
+                        "https://graph.microsoft.com/User.Read " +
+                        "offline_access");
+
+        ResponseEntity<Map> tokenResponse = restTemplate.exchange(
+                "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+                HttpMethod.POST,
+                new HttpEntity<>(body, headers),
+                Map.class);
+
+        if (!tokenResponse.getStatusCode().is2xxSuccessful() || tokenResponse.getBody() == null) {
+            throw new RuntimeException(
+                    "Token refresh failed: " + tokenResponse.getStatusCode() +
+                            ". Please sign in with Microsoft again.");
+        }
+
+        Map<String, Object> tokens = tokenResponse.getBody();
+
+        String newAccessToken  = (String) tokens.get("access_token");
+        String newRefreshToken = tokens.containsKey("refresh_token")
+                ? (String) tokens.get("refresh_token")
+                : user.getMicrosoftRefreshToken();   // keep old one if not rotated
+        int    expiresIn       = tokens.containsKey("expires_in")
+                ? ((Number) tokens.get("expires_in")).intValue()
+                : 3600;
+
+        // Persist new tokens
+        user.setMicrosoftAccessToken(newAccessToken);
+        user.setMicrosoftRefreshToken(newRefreshToken);
+        user.setMicrosoftTokenExpiry(OffsetDateTime.now(ZoneOffset.UTC).plusSeconds(expiresIn));
+        userRepository.save(user);
+
+        log.info("Microsoft token refreshed successfully for {}", user.getEmail());
+        return newAccessToken;
     }
 
-    // ─── Convert Graph API event to Meeting entity ────────────────────────────
+    // -------------------------------------------------------------------------
+    // UPSERT a single calendar event into the meetings table
+    // -------------------------------------------------------------------------
 
-    @SuppressWarnings("unchecked")
-    private Meeting convertToMeeting(Map<String, Object> event, User user) {
-        String microsoftEventId = (String) event.get("id");
-        String title = (String) event.getOrDefault("subject", "Untitled Meeting");
+    private int upsertEvent(User user, Map<String, Object> event) {
+        String msId = (String) event.get("id");
+        if (msId == null) return 0;
 
-        // Prefix MS_ to avoid collision with Google Calendar IDs
-        String calendarEventId = "MS_" + microsoftEventId;
+        String calendarEventId = "MS_" + msId;
 
-        // Dedup: skip if already synced (reuses existing findByUserAndCalendarEventId)
-        if (meetingRepository.findByUserAndCalendarEventId(user, calendarEventId).isPresent()) {
-            return null;
-        }
-
+        // Parse start/end
         Map<String, String> startMap = (Map<String, String>) event.get("start");
         Map<String, String> endMap   = (Map<String, String>) event.get("end");
-        if (startMap == null || endMap == null) return null;
+        if (startMap == null || endMap == null) return 0;
 
-        OffsetDateTime startTime = parseMicrosoftDateTime(startMap);
-        OffsetDateTime endTime   = parseMicrosoftDateTime(endMap);
-        if (startTime == null || endTime == null) return null;
+        OffsetDateTime startTime = parseDateTime(startMap.get("dateTime"), startMap.get("timeZone"));
+        OffsetDateTime endTime   = parseDateTime(endMap.get("dateTime"),   endMap.get("timeZone"));
+        if (startTime == null || endTime == null) return 0;
 
-        long durationMinutes = Duration.between(startTime, endTime).toMinutes();
-        if (durationMinutes <= 0) return null;
+        int durationMinutes = (int) java.time.Duration.between(startTime, endTime).toMinutes();
+        if (durationMinutes <= 0) return 0;
 
-        // Participant count
+        String title = (String) event.getOrDefault("subject", "Untitled Meeting");
+
+        // Count attendees
         List<Map<String, Object>> attendees =
-                (List<Map<String, Object>>) event.getOrDefault("attendees", Collections.emptyList());
+                (List<Map<String, Object>>) event.getOrDefault("attendees", List.of());
         int participantCount = Math.max(1, attendees.size());
 
-        // Cost estimate: (annual salary / 52 weeks / 40 hrs) * participants * hours
-        double hourlyRate = DEFAULT_SALARY / 52.0 / 40.0;
-        double costValue  = hourlyRate * participantCount * (durationMinutes / 60.0);
-        BigDecimal cost   = BigDecimal.valueOf(costValue).setScale(2, RoundingMode.HALF_UP);
+        // Estimate cost: assume avg $75/hr blended rate
+        BigDecimal costPerPersonPerHour = new BigDecimal("75.00");
+        BigDecimal hours = BigDecimal.valueOf(durationMinutes).divide(BigDecimal.valueOf(60), 4,
+                java.math.RoundingMode.HALF_UP);
+        BigDecimal estimatedCost = costPerPersonPerHour
+                .multiply(hours)
+                .multiply(BigDecimal.valueOf(participantCount))
+                .setScale(2, java.math.RoundingMode.HALF_UP);
 
-        return Meeting.builder()
+        // Upsert
+        Optional<Meeting> existing = meetingRepository.findByUserAndCalendarEventId(user, calendarEventId);
+        Meeting meeting = existing.orElse(Meeting.builder()
                 .user(user)
                 .calendarEventId(calendarEventId)
-                .title(title)
-                .startTime(startTime)
-                .endTime(endTime)
-                .durationMinutes((int) durationMinutes)
-                .participantCount(participantCount)
-                .estimatedCostUsd(cost)
-                .lastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC))
-                .build();
+                .build());
+
+        meeting.setTitle(title);
+        meeting.setStartTime(startTime);
+        meeting.setEndTime(endTime);
+        meeting.setDurationMinutes(durationMinutes);
+        meeting.setParticipantCount(participantCount);
+        meeting.setEstimatedCostUsd(estimatedCost);
+        meeting.setLastSyncedAt(OffsetDateTime.now(ZoneOffset.UTC));
+
+        meetingRepository.save(meeting);
+        return existing.isEmpty() ? 1 : 0;
     }
 
-    // ─── Parse Microsoft datetime format ─────────────────────────────────────
-    // Microsoft Graph returns: "2024-01-15T10:00:00.0000000" with variable fractional seconds
+    // -------------------------------------------------------------------------
+    // Parse Microsoft's datetime strings (UTC or floating) → OffsetDateTime
+    // -------------------------------------------------------------------------
 
-    private OffsetDateTime parseMicrosoftDateTime(Map<String, String> dateTimeMap) {
+    private OffsetDateTime parseDateTime(String dateTime, String timeZone) {
+        if (dateTime == null) return null;
         try {
-            String dateTimeStr = dateTimeMap.get("dateTime");
-            String timeZone    = dateTimeMap.getOrDefault("timeZone", "UTC");
-
-            DateTimeFormatter formatter = new DateTimeFormatterBuilder()
-                    .appendPattern("yyyy-MM-dd'T'HH:mm:ss")
-                    .optionalStart()
-                    .appendFraction(ChronoField.NANO_OF_SECOND, 0, 9, true)
-                    .optionalEnd()
-                    .toFormatter();
-
-            LocalDateTime ldt  = LocalDateTime.parse(dateTimeStr, formatter);
-            ZoneId         zone = ZoneId.of(timeZone);
-            return ldt.atZone(zone).toOffsetDateTime();
-
+            // Microsoft sends floating datetimes (no offset) when timeZone field is present
+            if (!dateTime.contains("Z") && !dateTime.contains("+") && !dateTime.contains("-", 10)) {
+                // Treat as UTC (Graph calendarView always returns UTC for calendarView endpoint)
+                dateTime = dateTime + "Z";
+            }
+            return OffsetDateTime.parse(dateTime, MS_DATETIME).withOffsetSameInstant(ZoneOffset.UTC);
         } catch (Exception e) {
-            log.warn("Could not parse Microsoft datetime: {}", e.getMessage());
+            log.warn("Could not parse Microsoft datetime '{}': {}", dateTime, e.getMessage());
             return null;
         }
     }
